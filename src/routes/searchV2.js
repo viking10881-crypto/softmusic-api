@@ -1,0 +1,245 @@
+const router = require('express').Router();
+const { db } = require('../config/db');
+const { unifiedSearch, fold, similarity, isNoisy } = require('../services/catalogMatcher');
+const { resolveCatalogSource, resolverStats } = require('../services/catalogResolver');
+const { autocomplete: audiusAutocomplete } = require('../providers/audius');
+const { searchSuggestions: deezerSuggestions } = require('../providers/deezerCatalog');
+const { searchLyrics, warmLyrics } = require('../services/lyrics');
+
+const responseCache = new Map();
+const suggestionCache = new Map();
+const CACHE_MS = 3 * 60_000;
+const SUGGEST_MS = 5 * 60_000;
+const CATALOG_VERSION = 'softmusic-lazy-playback-v6';
+
+function normalizeQuery(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 180);
+}
+
+function isSearchPlayable(track) {
+  if (!track?.id) return false;
+  const id = String(track.id);
+  const source = String(track.source || '').toLowerCase();
+  if (id.startsWith('au_') || source === 'audius') return true;
+  if (id.startsWith('yt_') || source === 'youtube') return Boolean(track.youtubeVideoId || track.externalId) && track.playbackVerified !== false;
+  return (id.startsWith('sc_') || source === 'soundcloud') && track.playbackVerified === true && track.streamVerified === true;
+}
+
+function dedupe(items, limit = 30) {
+  const seenIds = new Set();
+  const seenKeys = new Set();
+  const output = [];
+  for (const item of items || []) {
+    if (!item?.id || !item?.title || !isSearchPlayable(item)) continue;
+    const key = `${fold(item.catalogId || '')}|${fold(item.canonicalTitle || item.title)}|${fold(item.artist)}`;
+    if (seenIds.has(item.id) || seenKeys.has(key)) continue;
+    seenIds.add(item.id);
+    seenKeys.add(key);
+    output.push(item);
+    if (output.length >= limit) break;
+  }
+  return output;
+}
+
+async function saveTracks(tracks) {
+  const valid = (tracks || []).filter(track => track?.id && track?.title && !track.isPreview && isSearchPlayable(track));
+  if (!valid.length) return;
+  await Promise.allSettled(valid.map(track => db.query(
+    `INSERT INTO tracks (
+       id, source, external_id, title, artist, album, thumbnail, duration, metadata, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,NOW())
+     ON CONFLICT (id) DO UPDATE SET
+       source = EXCLUDED.source,
+       external_id = COALESCE(EXCLUDED.external_id, tracks.external_id),
+       title = EXCLUDED.title,
+       artist = EXCLUDED.artist,
+       album = EXCLUDED.album,
+       thumbnail = EXCLUDED.thumbnail,
+       duration = EXCLUDED.duration,
+       metadata = tracks.metadata || EXCLUDED.metadata,
+       updated_at = NOW()`,
+    [
+      track.id,
+      track.source,
+      track.externalId || track.youtubeVideoId || null,
+      track.canonicalTitle || track.title,
+      track.artist || null,
+      track.catalogAlbum || track.album || null,
+      track.thumbnail || null,
+      Number(track.duration || 0) || null,
+      JSON.stringify({
+        durationStr: track.durationStr || '',
+        genre: track.genre || '',
+        mood: track.mood || '',
+        permalink: track.permalink || '',
+        releaseDate: track.releaseDate || track.publishedAt || null,
+        playbackCount: Number(track.playbackCount || 0),
+        likesCount: Number(track.likesCount || 0),
+        repostsCount: Number(track.repostsCount || 0),
+        providerMode: track.providerMode || track.source,
+        youtubeVideoId: track.youtubeVideoId || null,
+        streamVerified: track.source === 'youtube' ? false : true,
+        playbackVerified: track.source === 'soundcloud' ? track.playbackVerified === true : true,
+        fullStream: true,
+        downloadable: track.source === 'audius' ? Boolean(track.downloadable) : false,
+        catalogVersion: CATALOG_VERSION,
+        catalogMatched: Boolean(track.catalogMatched),
+        catalogId: track.catalogId || null,
+        qualityScore: Number(track.qualityScore || 0),
+      }),
+    ]
+  )));
+}
+
+async function suggestionsFor(q) {
+  const key = fold(q);
+  const cached = suggestionCache.get(key);
+  if (cached && Date.now() - cached.at < SUGGEST_MS) return cached.value;
+
+  const [audius, deezer] = await Promise.all([
+    audiusAutocomplete(q, 8).catch(() => []),
+    deezerSuggestions(q, 8).catch(() => []),
+  ]);
+  const seen = new Set();
+  const suggestions = [];
+  for (const item of [...deezer, ...audius]) {
+    if (!item?.value) continue;
+    const skey = `${item.type}|${fold(item.value)}`;
+    if (seen.has(skey)) continue;
+    seen.add(skey);
+    suggestions.push(item);
+    if (suggestions.length >= 10) break;
+  }
+
+  const artist = suggestions.find(item => item.type === 'artist');
+  let correction = null;
+  if (artist && fold(artist.value) !== key && similarity(q, artist.value) >= 0.58) correction = artist.value;
+
+  const value = { suggestions, correction };
+  suggestionCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+router.get('/suggest', async (req, res) => {
+  const q = normalizeQuery(req.query.q);
+  if (q.length < 2) return res.json({ suggestions: [], correction: null });
+  try {
+    return res.json(await suggestionsFor(q));
+  } catch (error) {
+    console.warn('[SoftMusic suggest]', error.message);
+    return res.json({ suggestions: [], correction: null });
+  }
+});
+
+router.post('/resolve', async (req, res) => {
+  try {
+    const track = await resolveCatalogSource(req.body || {}, { allowSoundCloud: true });
+    if (!track) {
+      return res.status(404).json({
+        error: 'No encontramos una fuente reproducible para esta canción todavía.',
+        code: 'SOURCE_NOT_FOUND',
+      });
+    }
+    saveTracks([track]).catch(() => {});
+    return res.json({ track, resolver: resolverStats() });
+  } catch (error) {
+    return res.status(error.status || 503).json({ error: error.message || 'No fue posible resolver la canción.' });
+  }
+});
+
+router.get('/fast', async (req, res) => {
+  const q = normalizeQuery(req.query.q);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 40);
+  if (!q) return res.status(400).json({ error: 'Falta el parámetro q' });
+
+  try {
+    const result = await unifiedSearch(q, limit, { includeSoundCloudFallback: false, quick: true });
+    const playable = dedupe(result.tracks, limit);
+    saveTracks(playable).then(() => warmLyrics(playable.filter(track => track.source !== 'youtube'), 3)).catch(() => {});
+    return res.json({
+      results: playable,
+      artists: result.artists,
+      albums: result.albums,
+      catalogTracks: result.catalogTracks.slice(0, 30),
+      artistMode: result.artistMode || null,
+      providers: { ...result.providers, playbackPrimary: 'youtube-on-demand', playbackFallback: null },
+      cached: result.cached,
+      provisional: true,
+      interpretedQuery: q,
+      searchMode: 'softmusic-instant-catalog-v1',
+      availability: {
+        playable: playable.length,
+        catalog: result.catalogTracks.length,
+        youtube: playable.filter(track => track.source === 'youtube').length,
+      },
+    });
+  } catch (error) {
+    console.warn('[SoftMusic search fast]', error.message);
+    return res.status(503).json({ error: 'No fue posible consultar el catálogo en este momento.' });
+  }
+});
+
+router.get('/', async (req, res) => {
+  const q = normalizeQuery(req.query.q);
+  const limit = Math.min(Math.max(Number(req.query.limit) || 30, 1), 40);
+  if (!q) return res.status(400).json({ error: 'Falta el parámetro q' });
+
+  const key = `${fold(q)}|${limit}|instant-catalog-v6`;
+  const cached = responseCache.get(key);
+  if (cached && Date.now() - cached.at < CACHE_MS) return res.json({ ...cached.value, cached: true });
+
+  try {
+    const [suggestionData, result] = await Promise.all([
+      suggestionsFor(q).catch(() => ({ suggestions: [], correction: null })),
+      // Important: do not block the whole search resolving 20-30 audio sources.
+      // Return canonical Deezer results immediately and resolve missing playback only when the user taps a song.
+      unifiedSearch(q, limit, { includeSoundCloudFallback: false, quick: true }),
+    ]);
+
+    let lyricResults = [];
+    if (q.split(/\s+/).length >= 3) {
+      lyricResults = await searchLyrics(q, Math.min(6, limit)).catch(() => []);
+      lyricResults = lyricResults.filter(track => !isNoisy(track, q) && isSearchPlayable(track));
+    }
+
+    const results = dedupe([...result.tracks, ...lyricResults], limit);
+    const lyricWarmable = results.filter(track => track.source !== 'youtube');
+    saveTracks(results).then(() => warmLyrics(lyricWarmable, 4)).catch(error => console.warn('[SoftMusic catalog cache]', error.message));
+
+    const value = {
+      results,
+      artists: result.artists,
+      albums: result.albums,
+      catalogTracks: result.catalogTracks.slice(0, 30),
+      artistMode: result.artistMode || null,
+      providers: {
+        ...result.providers,
+        playbackPrimary: 'youtube-on-demand',
+        playbackSecondary: 'audius',
+        playbackFallback: 'soundcloud-on-demand',
+        lazyResolver: true,
+      },
+      correction: suggestionData.correction,
+      suggestions: suggestionData.suggestions,
+      interpretedQuery: suggestionData.correction || q,
+      lyricMatches: lyricResults.length,
+      cached: result.cached,
+      searchMode: lyricResults.length ? 'softmusic-instant-catalog+lyrics' : 'softmusic-instant-catalog',
+      availability: {
+        playable: results.length,
+        catalog: result.catalogTracks.length,
+        audius: results.filter(track => track.source === 'audius').length,
+        youtube: results.filter(track => track.source === 'youtube').length,
+        soundcloudVerified: results.filter(track => track.source === 'soundcloud' && track.playbackVerified === true).length,
+      },
+    };
+    responseCache.set(key, { at: Date.now(), value });
+    console.log(`[SoftMusic Search] "${q}" instant catalog:${result.catalogTracks.length} ready:${results.length} AU:${value.availability.audius} YT:${value.availability.youtube}`);
+    return res.json(value);
+  } catch (error) {
+    console.error('[SoftMusic Search]', error);
+    return res.status(503).json({ error: 'No fue posible consultar el catálogo en este momento.' });
+  }
+});
+
+module.exports = router;

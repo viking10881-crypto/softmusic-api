@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: softmusic-api
+    env: node
+    buildCommand: npm ci --omit=dev
+    startCommand: npm start
+    autoDeployTrigger: checksPass
+    healthCheckPath: /healthz
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: NODE_ENV
+        value: production
+    disk:
+      name: downloads
+      mountPath: /opt/render/project/src/downloads
+      sizeGB: 5
