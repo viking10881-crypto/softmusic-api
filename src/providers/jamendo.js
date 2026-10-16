@@ -86,7 +86,12 @@ function safeLimit(limit, fallback = 30) {
 
 async function searchTracks(query, limit = 30) {
   // namesearch busca solo en nombres de canción, álbum y artista: más preciso que `search`, que mira también tags.
-  const rows = await requestJSON('/tracks/', { namesearch: query, limit: safeLimit(limit), order: 'relevance', include: 'musicinfo' });
+  // Jamendo a veces responde 0 resultados a una búsqueda que segundos después devuelve 20, así que reintentamos.
+  const params = { namesearch: query, limit: safeLimit(limit), order: 'relevance', include: 'musicinfo' };
+  let rows = [];
+  for (let attempt = 0; attempt < 3 && !rows.length; attempt += 1) {
+    rows = await requestJSON('/tracks/', params);
+  }
   return normalizeTracks(rows);
 }
 

@@ -94,6 +94,8 @@ async function saveTracks(tracks) {
   )));
 }
 
+const JAMENDO_STOPWORDS = new Set(['the', 'and', 'for', 'with', 'los', 'las', 'del', 'por', 'con', 'una', 'que', 'les', 'des', 'feat']);
+
 // Jamendo es música independiente: solo mostramos lo que coincide claramente con la búsqueda
 // para no tapar el catálogo comercial con canciones que apenas comparten una palabra.
 async function jamendoMatches(q, artistMode, limit) {
@@ -103,11 +105,18 @@ async function jamendoMatches(q, artistMode, limit) {
     return [];
   });
   if (artistMode) return tracks.filter(track => similarity(track.artist, artistMode) >= 0.86);
-  const tokens = fold(q).split(' ').filter(Boolean);
-  return tracks.filter(track => {
-    const haystack = fold(`${track.artist} ${track.title} ${track.album}`);
-    return tokens.every(token => haystack.includes(token));
-  });
+  // namesearch de Jamendo busca cualquiera de las palabras: exigimos al menos una significativa y
+  // ordenamos por cuántas coinciden, para que "la bicicleta" no traiga todo lo que contenga "la".
+  const tokens = fold(q).split(' ').filter(token => token.length >= 3 && !JAMENDO_STOPWORDS.has(token));
+  if (!tokens.length) return [];
+  return tracks
+    .map(track => {
+      const haystack = fold(`${track.artist} ${track.title} ${track.album}`);
+      return { track, hits: tokens.filter(token => haystack.includes(token)).length };
+    })
+    .filter(row => row.hits > 0)
+    .sort((a, b) => b.hits - a.hits)
+    .map(row => row.track);
 }
 
 async function suggestionsFor(q) {
