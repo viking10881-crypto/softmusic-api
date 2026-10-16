@@ -18,6 +18,7 @@ function inferSource(id, explicit) {
   if (explicit) return String(explicit).toLowerCase();
   if (String(id).startsWith('au_')) return 'audius';
   if (String(id).startsWith('sc_')) return 'soundcloud';
+  if (String(id).startsWith('jm_')) return 'jamendo';
   if (String(id).startsWith('dz_')) return 'deezer';
   return 'unknown';
 }
@@ -29,7 +30,7 @@ async function upsertTrack(track) {
   const source = inferSource(id, track.source);
   const externalId = id.includes('_') ? id.slice(id.indexOf('_') + 1) : null;
   const duration = nonNegativeInt(track.duration, 0) || null;
-  const fullProvider = source === 'audius' || source === 'soundcloud';
+  const fullProvider = ['audius', 'soundcloud', 'jamendo'].includes(source);
 
   await db.query(
     `INSERT INTO tracks (id, source, external_id, title, artist, album, thumbnail, duration, metadata, updated_at)
@@ -94,7 +95,7 @@ router.post('/', async (req, res) => {
     );
 
     const normalizedSource = inferSource(track_id, source);
-    if ((normalizedSource === 'audius' || normalizedSource === 'soundcloud') && title && artist) {
+    if (['audius', 'soundcloud', 'jamendo'].includes(normalizedSource) && title && artist) {
       cacheLyrics({
         id: String(track_id),
         title: String(title),
@@ -148,6 +149,7 @@ router.patch('/:id', async (req, res) => {
 
 router.get('/', async (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 200);
+  try {
   const tracks = await db.all(
     `SELECT * FROM (
        SELECT DISTINCT ON (h.track_id)
@@ -182,6 +184,10 @@ router.get('/', async (req, res) => {
     [req.user.id, limit, UNIFIED_CATALOG_VERSION, LEGACY_SC_VERSION]
   );
   return res.json({ tracks, catalogVersion: UNIFIED_CATALOG_VERSION });
+  } catch (error) {
+    console.error('[History list]', error.message);
+    return res.status(500).json({ error: 'No se pudo cargar el historial' });
+  }
 });
 
 module.exports = router;

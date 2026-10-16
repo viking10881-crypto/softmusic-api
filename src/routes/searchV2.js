@@ -3,6 +3,7 @@ const { db } = require('../config/db');
 const { unifiedSearch, fold, similarity, isNoisy } = require('../services/catalogMatcher');
 const { resolveCatalogSource, resolverStats } = require('../services/catalogResolver');
 const { autocomplete: audiusAutocomplete } = require('../providers/audius');
+const { searchTracks: jamendoSearch, configured: jamendoConfigured } = require('../providers/jamendo');
 const { searchSuggestions: deezerSuggestions } = require('../providers/deezerCatalog');
 const { searchLyrics, warmLyrics } = require('../services/lyrics');
 
@@ -21,6 +22,7 @@ function isSearchPlayable(track) {
   const id = String(track.id);
   const source = String(track.source || '').toLowerCase();
   if (id.startsWith('au_') || source === 'audius') return true;
+  if (id.startsWith('jm_') || source === 'jamendo') return true;
   if (id.startsWith('yt_') || source === 'youtube') return Boolean(track.youtubeVideoId || track.externalId) && track.playbackVerified !== false;
   return (id.startsWith('sc_') || source === 'soundcloud') && track.playbackVerified === true && track.streamVerified === true;
 }
@@ -81,7 +83,8 @@ async function saveTracks(tracks) {
         streamVerified: track.source === 'youtube' ? false : true,
         playbackVerified: track.source === 'soundcloud' ? track.playbackVerified === true : true,
         fullStream: true,
-        downloadable: track.source === 'audius' ? Boolean(track.downloadable) : false,
+        downloadable: ['audius', 'jamendo'].includes(track.source) ? Boolean(track.downloadable) : false,
+        license: track.license || null,
         catalogVersion: CATALOG_VERSION,
         catalogMatched: Boolean(track.catalogMatched),
         catalogId: track.catalogId || null,
@@ -89,6 +92,22 @@ async function saveTracks(tracks) {
       }),
     ]
   )));
+}
+
+// Jamendo es música independiente: solo mostramos lo que coincide claramente con la búsqueda
+// para no tapar el catálogo comercial con canciones que apenas comparten una palabra.
+async function jamendoMatches(q, artistMode, limit) {
+  if (!jamendoConfigured()) return [];
+  const tracks = await jamendoSearch(q, limit).catch(error => {
+    console.warn('[SoftMusic Jamendo]', error.message);
+    return [];
+  });
+  if (artistMode) return tracks.filter(track => similarity(track.artist, artistMode) >= 0.86);
+  const tokens = fold(q).split(' ').filter(Boolean);
+  return tracks.filter(track => {
+    const haystack = fold(`${track.artist} ${track.title} ${track.album}`);
+    return tokens.every(token => haystack.includes(token));
+  });
 }
 
 async function suggestionsFor(q) {
@@ -202,7 +221,8 @@ router.get('/', async (req, res) => {
       lyricResults = lyricResults.filter(track => !isNoisy(track, q) && isSearchPlayable(track));
     }
 
-    const results = dedupe([...result.tracks, ...lyricResults], limit);
+    const jamendoTracks = await jamendoMatches(q, result.artistMode, Math.min(20, limit));
+    const results = dedupe([...result.tracks, ...lyricResults, ...jamendoTracks], limit);
     const lyricWarmable = results.filter(track => track.source !== 'youtube');
     saveTracks(results).then(() => warmLyrics(lyricWarmable, 4)).catch(error => console.warn('[SoftMusic catalog cache]', error.message));
 
@@ -229,12 +249,13 @@ router.get('/', async (req, res) => {
         playable: results.length,
         catalog: result.catalogTracks.length,
         audius: results.filter(track => track.source === 'audius').length,
+        jamendo: results.filter(track => track.source === 'jamendo').length,
         youtube: results.filter(track => track.source === 'youtube').length,
         soundcloudVerified: results.filter(track => track.source === 'soundcloud' && track.playbackVerified === true).length,
       },
     };
     responseCache.set(key, { at: Date.now(), value });
-    console.log(`[SoftMusic Search] "${q}" instant catalog:${result.catalogTracks.length} ready:${results.length} AU:${value.availability.audius} YT:${value.availability.youtube}`);
+    console.log(`[SoftMusic Search] "${q}" instant catalog:${result.catalogTracks.length} ready:${results.length} AU:${value.availability.audius} JM:${value.availability.jamendo} YT:${value.availability.youtube}`);
     return res.json(value);
   } catch (error) {
     console.error('[SoftMusic Search]', error);

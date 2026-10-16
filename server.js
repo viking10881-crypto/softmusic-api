@@ -1,11 +1,12 @@
 require('dotenv').config();
-const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const { initDB } = require('./src/config/db');
+const { DOWNLOADS_DIR } = require('./src/config/downloads');
 const { warmSoundCloud, soundCloudMode } = require('./src/services/soundcloud');
 const { providerStatus: audiusStatus, trendingTracks: audiusTrending } = require('./src/providers/audius');
 const { providerStatus: youtubeStatus } = require('./src/providers/youtube');
+const { providerStatus: jamendoStatus } = require('./src/providers/jamendo');
 
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
@@ -70,7 +71,7 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use('/downloads', express.static(path.join(__dirname, 'downloads'), {
+app.use('/downloads', express.static(DOWNLOADS_DIR, {
   fallthrough: true,
   maxAge: '1h',
   setHeaders(res) {
@@ -109,6 +110,7 @@ app.get('/', (_req, res) => {
       catalog: 'deezer',
       playbackPrimary: 'youtube-on-demand',
       playbackSecondary: 'audius',
+      playbackFullCC: 'jamendo',
       playbackFallback: 'soundcloud-on-demand-verified',
     },
   });
@@ -137,6 +139,7 @@ app.get('/api/health', async (_req, res) => {
     playback: 'youtube-visible-lazy-v1',
     audius: audius.status === 'fulfilled' ? audius.value : { ok: false, error: audius.reason?.message },
     youtube: youtubeStatus(),
+    jamendo: jamendoStatus(),
     deezer: deezer.status === 'fulfilled' ? deezer.value : { ok: false, error: deezer.reason?.message },
     catalogResolver: resolverStats(),
     soundcloudFallback: { mode: soundCloudMode(), scope: 'on-demand-canonical', resolver: getStreamResolverStats() },
@@ -153,7 +156,9 @@ app.use((err, _req, res, next) => {
 });
 
 let server;
-initDB()
+// En Vercel cada arranque en frío ejecutaría el DDL y, si Supabase tarda, process.exit tumbaría la petición.
+// Allí el esquema se aplica aparte con `npm run db:init`; Vercel sirve la app exportada sin listen.
+if (!process.env.VERCEL) initDB()
   .then(() => {
     server = app.listen(PORT, () => {
       console.log(`SoftMusic API v26 corriendo en puerto ${PORT} · instant Deezer catalog · YouTube visible on demand · Audius secondary · verified SoundCloud fallback`);
@@ -175,5 +180,12 @@ function shutdown(signal) {
   setTimeout(() => process.exit(1), 10_000).unref();
 }
 
+// Express 4 no captura errores de handlers async: sin esto, un fallo de DB en una ruta tumba todo el proceso.
+process.on('unhandledRejection', error => {
+  console.error('[unhandledRejection]', error?.message || error);
+});
+
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+module.exports = app;

@@ -8,11 +8,15 @@ const {
   downloadTrackToFile: downloadAudiusTrack,
   getTrack: getAudiusTrack,
 } = require('../providers/audius');
+const {
+  trackAudioUrl: jamendoAudioUrl,
+  downloadTrackToFile: downloadJamendoTrack,
+} = require('../providers/jamendo');
 const { pipeAudio, downloadAudio } = require('../services/ffmpeg');
 const { sanitize } = require('../utils/helpers');
+const { DOWNLOADS_DIR } = require('../config/downloads');
 
-const DOWNLOADS_DIR = path.join(__dirname, '../../downloads');
-const TRACK_ID_RE = /^(?:au|sc|dz|yt)_[A-Za-z0-9_-]{1,180}$/;
+const TRACK_ID_RE = /^(?:au|sc|dz|yt|jm)_[A-Za-z0-9_-]{1,180}$/;
 const ONE_DAY_MS = 86_400_000;
 const cleanupTimer = setInterval(cleanOldDownloads, 3_600_000);
 cleanupTimer.unref?.();
@@ -57,6 +61,18 @@ async function resolveAudioSource(trackId) {
       mimeType: 'audio/mpeg',
       proxyRequired: true,
       nativeProxy: true,
+      isPreview: false,
+    };
+  }
+
+  if (trackId.startsWith('jm_')) {
+    return {
+      url: await jamendoAudioUrl(trackId),
+      source: 'jamendo',
+      protocol: 'progressive',
+      mimeType: 'audio/mpeg',
+      proxyRequired: false,
+      nativeProxy: false,
       isPreview: false,
     };
   }
@@ -165,6 +181,8 @@ router.post('/download', async (req, res) => {
         });
       }
       await downloadAudiusTrack(videoId, filepath);
+    } else if (videoId.startsWith('jm_')) {
+      await downloadJamendoTrack(videoId, filepath);
     } else {
       const audio = await resolveAudioSource(videoId);
       if (audio.isPreview) {

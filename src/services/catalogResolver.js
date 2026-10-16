@@ -1,5 +1,6 @@
 const { searchTracks: audiusSearchTracks } = require('../providers/audius');
 const { searchVideos: youtubeSearchVideos, configured: youtubeConfigured } = require('../providers/youtube');
+const { searchTracks: jamendoSearchTracks, configured: jamendoConfigured } = require('../providers/jamendo');
 const { scSearch } = require('./soundcloud');
 const { resolveSoundCloudStream } = require('./streamResolver');
 const { canonicalMatch, isNoisy, fold } = require('./catalogMatcher');
@@ -43,7 +44,7 @@ function accepted(track, canonical, provider) {
 
   const thresholds = provider === 'youtube'
     ? { score: 0.77, artist: 0.72, title: 0.82, duration: 32 }
-    : provider === 'audius'
+    : provider === 'audius' || provider === 'jamendo'
       ? { score: 0.80, artist: 0.78, title: 0.82, duration: 26 }
       : { score: 0.88, artist: 0.86, title: 0.86, duration: 18 };
 
@@ -95,16 +96,17 @@ function decorate(track, canonical, provider, stream = null) {
     playbackVerifiedAt: Date.now(),
     protocol: stream?.protocol || track.protocol || null,
     mimeType: stream?.mimeType || track.mimeType || null,
-    downloadable: provider === 'audius' ? Boolean(track.downloadable) : false,
+    downloadable: provider === 'audius' || provider === 'jamendo' ? Boolean(track.downloadable) : false,
   };
 }
 
 async function resolveFresh(canonical, { allowSoundCloud = true } = {}) {
   const exact = `${canonical.artist} ${canonical.titleShort || canonical.title}`;
 
-  const [youtubeCandidates, audiusCandidates] = await Promise.all([
+  const [youtubeCandidates, audiusCandidates, jamendoCandidates] = await Promise.all([
     youtubeConfigured() ? youtubeSearchVideos(exact, 10).catch(() => []) : Promise.resolve([]),
     audiusSearchTracks(exact, 10).catch(() => []),
+    jamendoConfigured() ? jamendoSearchTracks(exact, 10).catch(() => []) : Promise.resolve([]),
   ]);
 
   const youtube = best(youtubeCandidates, canonical, 'youtube');
@@ -112,6 +114,9 @@ async function resolveFresh(canonical, { allowSoundCloud = true } = {}) {
 
   const audius = best(audiusCandidates, canonical, 'audius');
   if (audius) return decorate(audius.track, canonical, 'audius');
+
+  const jamendo = best(jamendoCandidates, canonical, 'jamendo');
+  if (jamendo) return decorate(jamendo.track, canonical, 'jamendo');
 
   if (allowSoundCloud) {
     const soundcloudCandidates = await scSearch(exact, 10).catch(() => []);

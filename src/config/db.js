@@ -5,7 +5,7 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false },
   max: 10,
   idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  connectionTimeoutMillis: 10000,
 });
 
 const db = {
@@ -96,6 +96,27 @@ async function initDB() {
       fetched_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
+    CREATE TABLE IF NOT EXISTS tracks (
+      id          TEXT PRIMARY KEY,
+      source      TEXT NOT NULL,
+      external_id TEXT,
+      title       TEXT NOT NULL,
+      artist      TEXT,
+      album       TEXT,
+      thumbnail   TEXT,
+      duration    INTEGER,
+      metadata    JSONB NOT NULL DEFAULT '{}'::jsonb,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS saved_tracks (
+      user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      track_id   TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (user_id, track_id)
+    );
+
     CREATE TABLE IF NOT EXISTS search_history (
       id          BIGSERIAL PRIMARY KEY,
       user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -107,6 +128,14 @@ async function initDB() {
       UNIQUE(user_id, normalized)
     );
 
+    ALTER TABLE history
+      ADD COLUMN IF NOT EXISTS device_id    INTEGER,
+      ADD COLUMN IF NOT EXISTS progress_ms  INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS listened_ms  INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS completed    BOOLEAN NOT NULL DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS context_type TEXT,
+      ADD COLUMN IF NOT EXISTS context_id   TEXT;
+
     CREATE INDEX IF NOT EXISTS idx_history_user ON history(user_id);
     CREATE INDEX IF NOT EXISTS idx_history_played ON history(played_at DESC);
     CREATE INDEX IF NOT EXISTS idx_playlist_user ON playlists(user_id);
@@ -115,6 +144,7 @@ async function initDB() {
     CREATE INDEX IF NOT EXISTS idx_lyrics_title_artist ON lyrics_cache(LOWER(title), LOWER(artist));
     CREATE INDEX IF NOT EXISTS idx_lyrics_plain_fts
       ON lyrics_cache USING GIN (to_tsvector('simple', COALESCE(plain_lyrics, '')));
+    CREATE INDEX IF NOT EXISTS idx_saved_tracks_user_recent ON saved_tracks(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_search_history_user_recent
       ON search_history(user_id, updated_at DESC);
   `);

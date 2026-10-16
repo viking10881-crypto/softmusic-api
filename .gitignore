@@ -2,3 +2,6 @@ node_modules/
 downloads/
 .env
 *.log
+.vercel
+.env*
+!.env.example

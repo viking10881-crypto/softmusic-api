@@ -121,7 +121,7 @@ async function searchLyrics(query, limit = 10) {
        ) AS lyric_rank
      FROM lyrics_cache l
      JOIN tracks t ON t.id = l.track_id
-     WHERE t.source IN ('audius','soundcloud')
+     WHERE t.source IN ('audius','soundcloud','jamendo')
        AND t.metadata->>'streamVerified' = 'true'
        AND (
          t.metadata->>'catalogVersion' = 'softmusic-unified-v1'

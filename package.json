@@ -1,11 +1,12 @@
 {
   "name": "softmusic-api",
   "version": "1.0.0",
-  "description": "SoftMusic API — unified music catalog, playback, radio, offline and Connect",
+  "description": "SoftMusic API \u2014 unified music catalog, playback, radio, offline and Connect",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "db:init": "node -e \"require('dotenv').config({quiet:true});require('./src/config/db').initDB().then(()=>process.exit(0),e=>{console.error(e.message);process.exit(1)})\""
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

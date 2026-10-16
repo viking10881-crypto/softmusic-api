@@ -1,0 +1,18 @@
+{
+  "services": {
+    "softmusic-api": {
+      "root": ".",
+      "buildCommand": "npm ci --omit=dev",
+      "entrypoint": "server.js"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": {
+        "type": "service",
+        "service": "softmusic-api"
+      }
+    }
+  ]
+}
